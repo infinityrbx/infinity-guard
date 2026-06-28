@@ -35,31 +35,47 @@ import javax.crypto.spec.SecretKeySpec;
  *                       JVM results in a kick instead of a free pass.
  */
 public class GuardAgent {
-    private static final Set<String>    whitelist    = new HashSet<>();    // allowed resource-pack sha1s
-    private static final Set<String>    modWhitelist = new HashSet<>();    // allowed mod sha1s
-    private static final Set<String>    reported     = new HashSet<>();   // avoid duplicate reports
+    private static final Set<String>    whitelist     = new HashSet<>();    // allowed resource-pack sha1s
+    private static final Set<String>    modWhitelist  = new HashSet<>();    // allowed mod sha1s
+    private static final Set<String>    shaderWhitelist = new HashSet<>();  // allowed shaderpack sha1s
+    private static final Set<String>    reported      = new HashSet<>();   // avoid duplicate reports
     private static final Map<String, long[]> pending = new HashMap<>();   // stability tracker
 
     /** A file must be size-stable for this many ms before we hash it. */
     private static final long STABLE_MS = 600;
 
-    private static final File RP_DIR   = new File("resourcepacks");
-    private static final File MODS_DIR = new File("mods");
+    private static final File RP_DIR     = new File("resourcepacks");
+    private static final File MODS_DIR   = new File("mods");
+    private static final File SHADER_DIR = new File("shaderpacks");
+
+    // Enforcement is active when the launcher passed the property at all — an
+    // EMPTY whitelist then means "nothing is allowed", not "don't enforce".
+    private static boolean modEnforcement    = false;
+    private static boolean shaderEnforcement = false;
 
     private static volatile boolean running = true;
 
     public static void premain(String agentArgs, Instrumentation inst) {
-        System.out.println("[Infinity Guard] Agent loaded — enforcing resource pack + mod whitelist.");
+        System.out.println("[Infinity Guard] Agent loaded — enforcing pack + mod + shader whitelist.");
 
         loadHashes(System.getProperty("infinity.whitelist"), whitelist);
-        loadHashes(System.getProperty("infinity.mod_whitelist"), modWhitelist);
-        System.out.println("[Infinity Guard] Loaded " + whitelist.size()
-            + " pack hash(es), " + modWhitelist.size() + " mod hash(es).");
 
-        // Scan mods/ synchronously BEFORE returning — premain runs before the
-        // Fabric mod loader, so an unauthorized jar injected after sync (TOCTOU)
-        // is caught here before it can load.
+        String modProp = System.getProperty("infinity.mod_whitelist");
+        modEnforcement = modProp != null;
+        loadHashes(modProp, modWhitelist);
+
+        String shaderProp = System.getProperty("infinity.shader_whitelist");
+        shaderEnforcement = shaderProp != null;
+        loadHashes(shaderProp, shaderWhitelist);
+
+        System.out.println("[Infinity Guard] Loaded " + whitelist.size() + " pack, "
+            + modWhitelist.size() + " mod, " + shaderWhitelist.size() + " shader hash(es).");
+
+        // Scan synchronously BEFORE returning — premain runs before the Fabric
+        // mod loader, so a jar/shader injected after sync (TOCTOU) is caught
+        // here before it can load.
         scanModsOnce();
+        scanShadersOnce();
 
         startPackMonitor();
         startAttestation();
@@ -73,9 +89,9 @@ public class GuardAgent {
         }
     }
 
-    /** One-shot startup scan of mods/ — reports any jar not in the whitelist. */
+    /** Scan mods/ — reports any jar not in the whitelist. */
     private static void scanModsOnce() {
-        if (modWhitelist.isEmpty()) return; // nothing to enforce against
+        if (!modEnforcement) return; // launcher did not request mod enforcement
         if (!MODS_DIR.exists() || !MODS_DIR.isDirectory()) return;
         File[] files = MODS_DIR.listFiles();
         if (files == null) return;
@@ -91,11 +107,40 @@ public class GuardAgent {
         }
     }
 
+    /** Scan shaderpacks/ — reports + deletes any shader not in the whitelist. */
+    private static void scanShadersOnce() {
+        if (!shaderEnforcement) return;
+        if (!SHADER_DIR.exists() || !SHADER_DIR.isDirectory()) return;
+        File[] files = SHADER_DIR.listFiles();
+        if (files == null) return;
+        for (File f : files) {
+            if (!isShaderEntry(f)) continue;
+            String key = f.getAbsolutePath();
+            if (reported.contains(key)) continue;
+
+            // A folder shader can't be hashed against the (zip-based) whitelist,
+            // so any directory in shaderpacks/ is treated as unauthorized.
+            String hash = f.isFile() ? sha1(f) : "";
+            boolean allowed = !hash.isEmpty() && shaderWhitelist.contains(hash);
+            if (!allowed) {
+                reportShaderViolation(f.getName(), hash.isEmpty() ? "(dir)" : hash);
+                reported.add(key);
+            }
+        }
+    }
+
     private static boolean isModFile(File f) {
         if (!f.isFile()) return false;
         String name = f.getName().toLowerCase();
         // .jar and .jar.disabled both load-relevant; ignore everything else.
         return name.endsWith(".jar");
+    }
+
+    private static boolean isShaderEntry(File f) {
+        String name = f.getName().toLowerCase();
+        if (name.equals(".ds_store") || name.equals("desktop.ini")) return false;
+        if (f.isFile() && name.endsWith(".zip")) return true;
+        return f.isDirectory(); // extracted shaderpack folder
     }
 
     // ====================================================================
@@ -156,8 +201,9 @@ public class GuardAgent {
                         checkOptionsFile(optionsFile);
                     }
 
-                    // --- 3. Re-scan mods/ for jars dropped in after startup ---
+                    // --- 3. Re-scan mods/ and shaderpacks/ for late drops ---
                     scanModsOnce();
+                    scanShadersOnce();
 
                 } catch (InterruptedException e) {
                     break;
@@ -329,6 +375,51 @@ public class GuardAgent {
         } catch (Exception e) {
             System.err.println("[Infinity Guard] Failed to reach server: " + e.getMessage());
         }
+    }
+
+    /**
+     * Reports (and best-effort deletes) an unauthorized shaderpack. A fullbright
+     * / see-through shader is a vision cheat with no mod involved.
+     */
+    private static void reportShaderViolation(String shaderName, String shaderHash) {
+        System.err.println(
+            "[Infinity Guard] VIOLATION — shader: " + shaderName + " (sha1: " + shaderHash + ")"
+        );
+
+        File shaderFile = new File(SHADER_DIR, shaderName);
+        if (shaderFile.exists()) {
+            boolean removed = shaderFile.isDirectory() ? deleteRecursive(shaderFile) : shaderFile.delete();
+            System.err.println(removed
+                ? "[Infinity Guard] Shader removed: " + shaderName
+                : "[Infinity Guard] WARNING: could not remove shader: " + shaderName);
+        }
+
+        String serverUrl = System.getProperty("infinity.server_url");
+        String token     = System.getProperty("infinity.token");
+        if (serverUrl == null || serverUrl.isEmpty() || token == null || token.isEmpty()) {
+            System.err.println("[Infinity Guard] No server credentials — cannot report shader violation.");
+            return;
+        }
+
+        try {
+            String endpoint = serverUrl.replaceAll("/$", "") + "/api/launcher/report-violation";
+            String payload  = "{\"packName\":\"" + escapeJson(shaderName)
+                            + "\",\"packHash\":\"" + escapeJson(shaderHash)
+                            + "\",\"reason\":\"unauthorized_shader_pack\"}";
+            HttpResult res = post(endpoint, token, payload);
+            System.err.println("[Infinity Guard] Server notified of shader violation (HTTP "
+                + res.status + ") — server will kick the player.");
+        } catch (Exception e) {
+            System.err.println("[Infinity Guard] Failed to reach server: " + e.getMessage());
+        }
+    }
+
+    private static boolean deleteRecursive(File f) {
+        File[] children = f.listFiles();
+        if (children != null) {
+            for (File c : children) deleteRecursive(c);
+        }
+        return f.delete();
     }
 
     // ====================================================================
