@@ -35,31 +35,67 @@ import javax.crypto.spec.SecretKeySpec;
  *                       JVM results in a kick instead of a free pass.
  */
 public class GuardAgent {
-    private static final Set<String>    whitelist    = new HashSet<>();
+    private static final Set<String>    whitelist    = new HashSet<>();    // allowed resource-pack sha1s
+    private static final Set<String>    modWhitelist = new HashSet<>();    // allowed mod sha1s
     private static final Set<String>    reported     = new HashSet<>();   // avoid duplicate reports
     private static final Map<String, long[]> pending = new HashMap<>();   // stability tracker
 
     /** A file must be size-stable for this many ms before we hash it. */
     private static final long STABLE_MS = 600;
 
-    private static final File RP_DIR = new File("resourcepacks");
+    private static final File RP_DIR   = new File("resourcepacks");
+    private static final File MODS_DIR = new File("mods");
 
     private static volatile boolean running = true;
 
     public static void premain(String agentArgs, Instrumentation inst) {
-        System.out.println("[Infinity Guard] Agent loaded — enforcing resource pack whitelist.");
+        System.out.println("[Infinity Guard] Agent loaded — enforcing resource pack + mod whitelist.");
 
-        String whitelistProp = System.getProperty("infinity.whitelist");
-        if (whitelistProp != null && !whitelistProp.trim().isEmpty()) {
-            for (String hash : whitelistProp.split(",")) {
-                String trimmed = hash.trim().toLowerCase();
-                if (!trimmed.isEmpty()) whitelist.add(trimmed);
-            }
-        }
-        System.out.println("[Infinity Guard] Loaded " + whitelist.size() + " whitelisted pack hash(es).");
+        loadHashes(System.getProperty("infinity.whitelist"), whitelist);
+        loadHashes(System.getProperty("infinity.mod_whitelist"), modWhitelist);
+        System.out.println("[Infinity Guard] Loaded " + whitelist.size()
+            + " pack hash(es), " + modWhitelist.size() + " mod hash(es).");
+
+        // Scan mods/ synchronously BEFORE returning — premain runs before the
+        // Fabric mod loader, so an unauthorized jar injected after sync (TOCTOU)
+        // is caught here before it can load.
+        scanModsOnce();
 
         startPackMonitor();
         startAttestation();
+    }
+
+    private static void loadHashes(String prop, Set<String> into) {
+        if (prop == null || prop.trim().isEmpty()) return;
+        for (String hash : prop.split(",")) {
+            String trimmed = hash.trim().toLowerCase();
+            if (!trimmed.isEmpty()) into.add(trimmed);
+        }
+    }
+
+    /** One-shot startup scan of mods/ — reports any jar not in the whitelist. */
+    private static void scanModsOnce() {
+        if (modWhitelist.isEmpty()) return; // nothing to enforce against
+        if (!MODS_DIR.exists() || !MODS_DIR.isDirectory()) return;
+        File[] files = MODS_DIR.listFiles();
+        if (files == null) return;
+        for (File f : files) {
+            if (!isModFile(f)) continue;
+            String key = f.getAbsolutePath();
+            if (reported.contains(key)) continue;
+            String hash = sha1(f);
+            if (!hash.isEmpty() && !modWhitelist.contains(hash)) {
+                reportModViolation(f.getName(), hash);
+                reported.add(key);
+            }
+        }
+    }
+
+    private static boolean isModFile(File f) {
+        if (!f.isFile()) return false;
+        String name = f.getName().toLowerCase();
+        // .jar and .jar.disabled both load-relevant; ignore everything else.
+        return name.endsWith(".jar");
     }
 
     // ====================================================================
@@ -119,6 +155,9 @@ public class GuardAgent {
                     if (optionsFile.exists()) {
                         checkOptionsFile(optionsFile);
                     }
+
+                    // --- 3. Re-scan mods/ for jars dropped in after startup ---
+                    scanModsOnce();
 
                 } catch (InterruptedException e) {
                     break;
@@ -256,6 +295,37 @@ public class GuardAgent {
             HttpResult res = post(endpoint, token, payload);
             System.err.println("[Infinity Guard] Server notified (HTTP " + res.status
                 + ") — server will kick the player.");
+        } catch (Exception e) {
+            System.err.println("[Infinity Guard] Failed to reach server: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Reports an unauthorized mod. Unlike resource packs, a mod jar is already
+     * loaded (and often OS-locked) by the time we see it, so deleting it is
+     * futile — we rely on the server to kick via RCON.
+     */
+    private static void reportModViolation(String modName, String modHash) {
+        System.err.println(
+            "[Infinity Guard] VIOLATION — mod: " + modName + " (sha1: " + modHash + ")"
+        );
+
+        String serverUrl = System.getProperty("infinity.server_url");
+        String token     = System.getProperty("infinity.token");
+        if (serverUrl == null || serverUrl.isEmpty() || token == null || token.isEmpty()) {
+            System.err.println("[Infinity Guard] No server credentials — cannot report mod violation.");
+            return;
+        }
+
+        try {
+            String endpoint = serverUrl.replaceAll("/$", "") + "/api/launcher/report-violation";
+            // Reuse the existing endpoint shape; packName carries the mod name.
+            String payload  = "{\"packName\":\"" + escapeJson(modName)
+                            + "\",\"packHash\":\"" + escapeJson(modHash)
+                            + "\",\"reason\":\"unauthorized_mod\"}";
+            HttpResult res = post(endpoint, token, payload);
+            System.err.println("[Infinity Guard] Server notified of mod violation (HTTP "
+                + res.status + ") — server will kick the player.");
         } catch (Exception e) {
             System.err.println("[Infinity Guard] Failed to reach server: " + e.getMessage());
         }

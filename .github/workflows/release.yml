@@ -27,7 +27,7 @@ jobs:
       - name: Compute SHA-1 (pin this in the launcher)
         id: sha
         run: |
-          SHA1=$(sha1sum infinity-guard-1.0.0.jar | awk '{print $1}')
+          SHA1=$(sha1sum infinity-guard-1.1.0.jar | awk '{print $1}')
           echo "sha1=$SHA1" >> "$GITHUB_OUTPUT"
           echo "::notice title=Jar SHA-1::$SHA1 — pin GUARD_AGENT_SHA1 to this"
 
@@ -35,7 +35,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: infinity-guard-1.0.0.jar
+          files: infinity-guard-1.1.0.jar
           body: |
             Pack whitelist enforcement + server attestation heartbeat.
 
