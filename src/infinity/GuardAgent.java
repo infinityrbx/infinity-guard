@@ -183,6 +183,13 @@ public class GuardAgent {
 
                                 if (reported.contains(key)) continue; // already handled
 
+                                // A folder pack can't match the (zip-based) whitelist, so,
+                                // like shader folders, it's always unauthorized.
+                                if (file.isDirectory()) {
+                                    reportViolation(file.getName(), "(dir)", "unauthorized_resource_pack_file");
+                                    reported.add(key);
+                                    continue;
+                                }
                                 String hash = sha256(file);
                                 if (!hash.isEmpty() && !whitelist.contains(hash)) {
                                     reportViolation(file.getName(), hash, "unauthorized_resource_pack_file");
@@ -319,7 +326,7 @@ public class GuardAgent {
         // Remove the file immediately so Minecraft can't read more data from it
         File packFile = new File(RP_DIR, packName);
         if (packFile.exists()) {
-            if (packFile.delete()) {
+            if (packFile.isDirectory() ? deleteRecursive(packFile) : packFile.delete()) {
                 System.err.println("[Infinity Guard] Pack file deleted: " + packName);
             } else {
                 System.err.println("[Infinity Guard] WARNING: Could not delete: " + packName);
@@ -479,6 +486,11 @@ public class GuardAgent {
                 if (state != null && (state[0] != size || now - state[1] < STABLE_MS)) continue;
                 if (reported.contains(key)) continue;
 
+                if (packFile.isDirectory()) {
+                    reportViolation(filename, "(dir)", "unauthorized_pack_in_options");
+                    reported.add(key);
+                    continue;
+                }
                 String hash = sha256(packFile);
                 if (!hash.isEmpty() && !whitelist.contains(hash)) {
                     reportViolation(filename, hash, "unauthorized_pack_in_options");

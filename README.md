@@ -12,7 +12,7 @@ In-process Java agent (`-javaagent`) for the Infinity MC launcher.
 ```
 ./build.sh
 ```
-Produces `infinity-guard-1.2.1.jar` (Premain-Class: `infinity.GuardAgent`).
+Produces `infinity-guard-1.2.2.jar` (Premain-Class: `infinity.GuardAgent`).
 
 ## JVM properties
 - `infinity.server_url` — auth/sync server base URL
