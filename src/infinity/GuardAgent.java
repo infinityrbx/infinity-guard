@@ -35,9 +35,9 @@ import javax.crypto.spec.SecretKeySpec;
  *                       JVM results in a kick instead of a free pass.
  */
 public class GuardAgent {
-    private static final Set<String>    whitelist     = new HashSet<>();    // allowed resource-pack sha1s
-    private static final Set<String>    modWhitelist  = new HashSet<>();    // allowed mod sha1s
-    private static final Set<String>    shaderWhitelist = new HashSet<>();  // allowed shaderpack sha1s
+    private static final Set<String>    whitelist     = new HashSet<>();    // allowed resource-pack sha256s
+    private static final Set<String>    modWhitelist  = new HashSet<>();    // allowed mod sha256s
+    private static final Set<String>    shaderWhitelist = new HashSet<>();  // allowed shaderpack sha256s
     private static final Set<String>    reported      = new HashSet<>();   // avoid duplicate reports
     private static final Map<String, long[]> pending = new HashMap<>();   // stability tracker
 
@@ -99,7 +99,7 @@ public class GuardAgent {
             if (!isModFile(f)) continue;
             String key = f.getAbsolutePath();
             if (reported.contains(key)) continue;
-            String hash = sha1(f);
+            String hash = sha256(f);
             if (!hash.isEmpty() && !modWhitelist.contains(hash)) {
                 reportModViolation(f.getName(), hash);
                 reported.add(key);
@@ -120,7 +120,7 @@ public class GuardAgent {
 
             // A folder shader can't be hashed against the (zip-based) whitelist,
             // so any directory in shaderpacks/ is treated as unauthorized.
-            String hash = f.isFile() ? sha1(f) : "";
+            String hash = f.isFile() ? sha256(f) : "";
             boolean allowed = !hash.isEmpty() && shaderWhitelist.contains(hash);
             if (!allowed) {
                 reportShaderViolation(f.getName(), hash.isEmpty() ? "(dir)" : hash);
@@ -183,7 +183,7 @@ public class GuardAgent {
 
                                 if (reported.contains(key)) continue; // already handled
 
-                                String hash = sha1(file);
+                                String hash = sha256(file);
                                 if (!hash.isEmpty() && !whitelist.contains(hash)) {
                                     reportViolation(file.getName(), hash, "unauthorized_resource_pack_file");
                                     reported.add(key); // don't re-report on next tick
@@ -313,7 +313,7 @@ public class GuardAgent {
      */
     private static void reportViolation(String packName, String packHash, String reason) {
         System.err.println(
-            "[Infinity Guard] VIOLATION — pack: " + packName + " (sha1: " + packHash + ")"
+            "[Infinity Guard] VIOLATION — pack: " + packName + " (sha256: " + packHash + ")"
         );
 
         // Remove the file immediately so Minecraft can't read more data from it
@@ -353,7 +353,7 @@ public class GuardAgent {
      */
     private static void reportModViolation(String modName, String modHash) {
         System.err.println(
-            "[Infinity Guard] VIOLATION — mod: " + modName + " (sha1: " + modHash + ")"
+            "[Infinity Guard] VIOLATION — mod: " + modName + " (sha256: " + modHash + ")"
         );
 
         String serverUrl = System.getProperty("infinity.server_url");
@@ -383,7 +383,7 @@ public class GuardAgent {
      */
     private static void reportShaderViolation(String shaderName, String shaderHash) {
         System.err.println(
-            "[Infinity Guard] VIOLATION — shader: " + shaderName + " (sha1: " + shaderHash + ")"
+            "[Infinity Guard] VIOLATION — shader: " + shaderName + " (sha256: " + shaderHash + ")"
         );
 
         File shaderFile = new File(SHADER_DIR, shaderName);
@@ -434,7 +434,7 @@ public class GuardAgent {
         return false;
     }
 
-    /** SHA-1 of every pack file currently in resourcepacks/ (lowercase hex). */
+    /** SHA-256 of every pack file currently in resourcepacks/ (lowercase hex). */
     private static List<String> currentPackHashes() {
         List<String> out = new ArrayList<>();
         if (RP_DIR.exists() && RP_DIR.isDirectory()) {
@@ -442,7 +442,7 @@ public class GuardAgent {
             if (files != null) {
                 for (File f : files) {
                     if (!isPackFile(f) || f.isDirectory()) continue;
-                    String h = sha1(f);
+                    String h = sha256(f);
                     if (!h.isEmpty()) out.add(h);
                 }
             }
@@ -479,7 +479,7 @@ public class GuardAgent {
                 if (state != null && (state[0] != size || now - state[1] < STABLE_MS)) continue;
                 if (reported.contains(key)) continue;
 
-                String hash = sha1(packFile);
+                String hash = sha256(packFile);
                 if (!hash.isEmpty() && !whitelist.contains(hash)) {
                     reportViolation(filename, hash, "unauthorized_pack_in_options");
                     reported.add(key);
@@ -488,14 +488,14 @@ public class GuardAgent {
         }
     }
 
-    private static String sha1(File file) {
+    private static String sha256(File file) {
         try (InputStream is = new FileInputStream(file)) {
-            MessageDigest digest = MessageDigest.getInstance("SHA-1");
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] buf = new byte[8192];
             int read;
             while ((read = is.read(buf)) > 0) digest.update(buf, 0, read);
             byte[] hash = digest.digest();
-            StringBuilder sb = new StringBuilder(40);
+            StringBuilder sb = new StringBuilder(64);
             for (byte b : hash) sb.append(String.format("%02x", b));
             return sb.toString();
         } catch (Exception e) {
